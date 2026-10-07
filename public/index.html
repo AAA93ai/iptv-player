@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IPTV Player</title>
-<script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+<script src="/vendor/hls.min.js"></script>
+<script src="/vendor/mpegts.js"></script>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#262a33; --text:#e6e8ec; --muted:#8b91a0; --accent:#4f8cff; --red:#ff5a5f; --green:#3ecf8e; }
   * { box-sizing: border-box; }
@@ -36,21 +36,26 @@
   .pill.recording,.pill.downloading { background:#4a2326; color:#ffb3b5; } .pill.done { background:#173b2c; color:var(--green); } .pill.error { background:#4a2326; }
   .prog { height:4px; background:#2a2f3a; border-radius:2px; margin-top:4px; } .prog > div { height:100%; background:var(--accent); border-radius:2px; }
   #err { color:var(--red); font-size:12px; min-height:1em; }
-  @media (max-width: 800px) { body { grid-template-columns:1fr; height:auto; } aside { max-height:55vh; } }
+  @media (max-width: 800px) {
+    body { display:flex; flex-direction:column; height:auto; }
+    main { display:contents; }
+    #v { order:0; position:sticky; top:0; z-index:5; max-height:40vh; }
+    aside { order:1; } aside #list { max-height:50vh; }
+    main > .bar, main > table { order:2; }
+  }
 </style>
 </head>
 <body>
 <aside>
   <div class="box">
-    <div class="row"><input id="plUrl" placeholder="Playlist URL (.m3u / .m3u8)"><button id="loadBtn">Load</button></div>
-    <details><summary>Xtream Codes login</summary>
+    <button id="provBtn">Load my channels</button>
+    <details><summary>Other playlist</summary>
       <div style="display:grid;gap:6px;margin-top:6px">
-        <input id="xtHost" placeholder="http://server:port">
-        <div class="row"><input id="xtUser" placeholder="username"><input id="xtPass" placeholder="password" type="password"></div>
-        <button id="xtBtn" class="ghost">Load Xtream playlist</button>
+        <div class="row"><input id="plUrl" placeholder="Playlist URL (.m3u / .m3u8)"><button id="loadBtn" class="ghost">Load</button></div>
+        <input type="file" id="plFile" accept=".m3u,.m3u8,.txt">
       </div>
     </details>
-    <div class="row"><input type="file" id="plFile" accept=".m3u,.m3u8,.txt" style="flex:1;min-width:0"></div>
+    <form method="post" action="/logout" style="margin:0"><button class="ghost" style="width:100%">Sign out</button></form>
     <div id="err"></div>
   </div>
   <div class="box">
@@ -75,134 +80,11 @@
       <option value="3600">1 hour</option><option value="7200">2 hours</option><option value="10800">3 hours</option>
     </select>
     <button id="dlBtn" class="rec" disabled>⏺ Download / Record</button>
-    <button id="copyBtn" class="ghost" disabled>Copy URL</button>
-  </div>
+      </div>
   <div class="bar" style="border:0;padding-bottom:0"><h2>Downloads</h2><span class="muted" id="outDir"></span></div>
   <table><thead><tr><th>Name</th><th>Status</th><th>Size</th><th></th></tr></thead><tbody id="jobs"></tbody></table>
 </main>
 
-<script>
-const $ = (id) => document.getElementById(id);
-const store = { get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
-let channels = [], current = null, hls = null, ts = null;
-
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]);
-const fmtBytes = (b) => !b ? '—' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
-const fmtTime = (s) => s == null ? '' : `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-const proxied = (ch) => '/proxy?' + new URLSearchParams({ url: ch.url, ...(Object.keys(ch.headers || {}).length ? { h: JSON.stringify(ch.headers) } : {}) });
-
-async function loadPlaylist(url, text) {
-  $('err').textContent = ''; $('count').textContent = 'Loading…';
-  try {
-    const r = text != null ? await fetch('/api/playlist', { method: 'POST', body: text })
-                           : await fetch('/api/playlist?url=' + encodeURIComponent(url));
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error);
-    channels = d.channels;
-    if (url) store.set('lastPlaylist', url);
-    const groups = [...new Set(channels.map((c) => c.group))].sort();
-    $('grp').innerHTML = '<option value="">All groups (' + groups.length + ')</option>' + groups.map((g) => `<option>${esc(g)}</option>`).join('');
-    render();
-  } catch (e) { $('err').textContent = e.message; $('count').textContent = 'No playlist loaded'; }
-}
-
-function render() {
-  const q = $('q').value.toLowerCase(), g = $('grp').value;
-  const hits = channels.filter((c) => (!g || c.group === g) && (!q || c.name.toLowerCase().includes(q)));
-  const shown = hits.slice(0, 600);
-  $('count').textContent = `${hits.length} of ${channels.length} channels` + (hits.length > shown.length ? ` (showing first ${shown.length} — refine search)` : '');
-  $('list').innerHTML = shown.map((c) => {
-    const i = channels.indexOf(c);
-    const img = c.logo ? `<img loading="lazy" src="${esc(c.logo)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'TV'}))">` : '<div class="ph">TV</div>';
-    return `<div class="ch${current === c ? ' active' : ''}" data-i="${i}">${img}<div style="min-width:0"><div class="n">${esc(c.name)}</div><div class="g">${esc(c.group)}</div></div></div>`;
-  }).join('');
-}
-
-function stopPlayer() {
-  if (hls) { hls.destroy(); hls = null; }
-  if (ts) { ts.destroy(); ts = null; }
-  const v = $('v'); v.removeAttribute('src'); v.load();
-}
-
-function play(ch) {
-  current = ch; stopPlayer(); render();
-  $('now').textContent = ch.name; $('dlBtn').disabled = false; $('copyBtn').disabled = false; $('err').textContent = '';
-  const v = $('v'), src = proxied(ch);
-  const fail = (msg) => { $('err').textContent = 'Playback failed: ' + msg + ' (you can still try Download / Record)'; };
-  const type = ch.type === 'unknown' ? 'hls' : ch.type; // most extension-less IPTV URLs are HLS
-  if (type === 'hls' && window.Hls?.isSupported()) {
-    hls = new Hls({ maxBufferLength: 30 });
-    hls.on(Hls.Events.ERROR, (_, d) => {
-      if (!d.fatal) return;
-      if (ch.type === 'unknown' && window.mpegts?.isSupported()) { hls.destroy(); hls = null; playTs(src, fail); }
-      else fail(d.details);
-    });
-    hls.loadSource(src); hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
-  } else if (type === 'hls' && v.canPlayType('application/vnd.apple.mpegurl')) {
-    v.src = src; v.play().catch(() => {});
-  } else if (type === 'mpegts') {
-    playTs(src, fail);
-  } else {
-    v.src = src; v.onerror = () => fail('format not supported by this browser (mkv/avi often are not)'); v.play().catch(() => {});
-  }
-}
-
-function playTs(src, fail) {
-  if (!window.mpegts?.isSupported()) return fail('MPEG-TS not supported in this browser');
-  ts = mpegts.createPlayer({ type: 'mpegts', isLive: true, url: location.origin + src });
-  ts.on(mpegts.Events.ERROR, (t, d) => fail(t + ' ' + d));
-  ts.attachMediaElement($('v')); ts.load(); ts.play();
-}
-
-async function download() {
-  if (!current) return;
-  const duration = Number($('dur').value);
-  const r = await fetch('/api/downloads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: current.url, name: current.name, headers: current.headers, duration }) });
-  const d = await r.json();
-  if (!r.ok) $('err').textContent = d.error; else pollJobs();
-}
-
-async function pollJobs() {
-  const { jobs } = await (await fetch('/api/downloads')).json();
-  $('jobs').innerHTML = jobs.length ? jobs.map((j) => {
-    const active = ['starting', 'downloading', 'recording', 'stopping'].includes(j.status);
-    const pct = j.total ? Math.min(100, (j.bytes / j.total) * 100) : j.duration ? Math.min(100, (j.seconds || 0) / j.duration * 100) : null;
-    const detail = j.mode === 'ffmpeg' ? fmtTime(j.seconds || 0) + (j.duration ? ' / ' + fmtTime(j.duration) : ' (live)') : (pct != null ? pct.toFixed(0) + '%' : '');
-    return `<tr><td>${esc(j.name)}<div class="muted">${esc(j.error || detail)}</div>${pct != null && active ? `<div class="prog"><div style="width:${pct}%"></div></div>` : ''}</td>
-      <td><span class="pill ${j.status}">${j.status}</span></td><td>${fmtBytes(j.bytes)}</td>
-      <td style="text-align:right">${j.status === 'done' ? `<a href="/files/${encodeURIComponent(j.file)}"><button class="ghost">Save</button></a> ` : ''}
-      <button class="ghost" data-job="${j.id}">${active ? 'Stop' : 'Clear'}</button></td></tr>`;
-  }).join('') : '<tr><td colspan="4" class="muted">No downloads yet.</td></tr>';
-  clearTimeout(pollJobs.t);
-  if (jobs.some((j) => !['done', 'error', 'cancelled'].includes(j.status))) pollJobs.t = setTimeout(pollJobs, 1000);
-}
-
-$('loadBtn').onclick = () => $('plUrl').value.trim() && loadPlaylist($('plUrl').value.trim());
-$('plUrl').onkeydown = (e) => e.key === 'Enter' && $('loadBtn').click();
-$('xtBtn').onclick = () => {
-  const host = $('xtHost').value.trim().replace(/\/+$/, ''), u = $('xtUser').value.trim(), p = $('xtPass').value;
-  if (!host || !u) return;
-  const url = `${host}/get.php?` + new URLSearchParams({ username: u, password: p, type: 'm3u_plus', output: 'm3u8' });
-  $('plUrl').value = url; loadPlaylist(url);
-};
-$('plFile').onchange = async (e) => { const f = e.target.files[0]; if (f) loadPlaylist(null, await f.text()); };
-$('q').oninput = render; $('grp').onchange = render;
-$('list').onclick = (e) => { const el = e.target.closest('.ch'); if (el) play(channels[+el.dataset.i]); };
-$('playDirect').onclick = () => {
-  const url = $('directUrl').value.trim(); if (!url) return;
-  const type = /\.m3u8(\?|$)/i.test(url) ? 'hls' : /\.(ts|flv)(\?|$)/i.test(url) ? 'mpegts' : /\.(mp4|mkv|webm|mov|m4v|avi)(\?|$)/i.test(url) ? 'file' : 'unknown';
-  play({ name: url.split('/').pop().split('?')[0] || 'stream', url, type, headers: {}, group: '' });
-};
-$('dlBtn').onclick = download;
-$('copyBtn').onclick = () => current && navigator.clipboard?.writeText(current.url);
-$('jobs').onclick = async (e) => { const id = e.target.dataset.job; if (id) { await fetch('/api/downloads/' + id, { method: 'DELETE' }); pollJobs(); } };
-
-fetch('/api/info').then((r) => r.json()).then((i) => {
-  $('outDir').textContent = 'Saved to ' + i.outDir + (i.ffmpeg ? '' : ' — ffmpeg missing: only direct file downloads work');
-});
-const last = store.get('lastPlaylist'); if (last) { $('plUrl').value = last; loadPlaylist(last); }
-pollJobs();
-</script>
+<script src="/app.js"></script>
 </body>
 </html>
