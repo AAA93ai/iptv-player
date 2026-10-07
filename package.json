@@ -1,0 +1,11 @@
+{
+  "name": "iptv-player",
+  "version": "1.0.0",
+  "description": "Standalone IPTV player & downloader: M3U/Xtream playlists, in-browser playback, ffmpeg recording.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": { "start": "node server.mjs" },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED",
+  "private": true
+}
