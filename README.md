@@ -2,7 +2,9 @@
 
 Standalone app. Zero npm dependencies (player libraries are bundled).
 
-- **Load my channels**: the provider login lives in the server config; the phone never sees it.
+- **Load my channels**: uses the Xtream API (`player_api.php`) — live channels plus movies (VOD) — and falls
+  back to `get.php` only if the API fails. The provider login lives in the server config; the phone never sees it.
+  Change it any time under **Settings**. (Series are not listed yet.)
 - Browse by group, search, tap to play (HLS via hls.js / native on iPhone, MPEG-TS via mpegts.js, MP4).
 - **Download / Record**: VOD files download directly; HLS and live channels are recorded with
   ffmpeg (`-c copy`, no re-encode) for a set time or until **Stop**. Files are saved on the server;

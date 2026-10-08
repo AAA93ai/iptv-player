@@ -123,8 +123,8 @@ $('jobs').onclick = async (e) => {
 
 api('/api/info').then((i) => {
   $('outDir').textContent = 'Saved on the server in ' + i.outDir + (i.ffmpeg ? '' : ' — ffmpeg missing: only direct file downloads work');
-  if (!i.provider) $('provBtn').style.display = 'none';
   if (i.channels) loadPlaylist(() => api('/api/playlist'));
   else if (i.provider) $('provBtn').click();
+  else $('err').textContent = 'No provider set — open Settings to add your IPTV login.';
 }).catch(() => {});
 pollJobs();

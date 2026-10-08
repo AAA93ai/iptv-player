@@ -188,6 +188,53 @@ function guessType(u) {
   return 'unknown';
 }
 
+// ------------------------------------------------------ Xtream Codes API
+// Many panels block or User-Agent-filter get.php (e.g. HTTP 884) but serve player_api.php,
+// which is what most IPTV apps use. Live channels + movies (VOD) are listed; series need a
+// per-show request and are not included.
+
+async function xtreamJson(url) {
+  const r = await upstream(url);
+  if (r.statusCode !== 200) { r.resume(); throw new Error(`provider API HTTP ${r.statusCode}`); }
+  const text = await readText(r, 200 * 1024 * 1024);
+  try { return JSON.parse(text); } catch { throw new Error('provider API returned something that is not JSON'); }
+}
+
+async function loadXtream(p) {
+  const base = p.host.replace(/\/+$/, '');
+  const api = (action) => `${base}/player_api.php?` + new URLSearchParams({ username: p.user, password: p.pass, ...(action ? { action } : {}) });
+  const info = await xtreamJson(api());
+  const ui = info && info.user_info;
+  if (!ui || Number(ui.auth) === 0) throw new Error('provider rejected the username/password');
+  if (ui.status && ui.status !== 'Active') throw new Error(`provider account status is "${ui.status}"`);
+  const fmts = Array.isArray(ui.allowed_output_formats) ? ui.allowed_output_formats : [];
+  const liveExt = fmts.length && !fmts.includes('m3u8') ? 'ts' : 'm3u8';
+  const seg = (v) => encodeURIComponent(String(v));
+  const catMap = (cats) => new Map((Array.isArray(cats) ? cats : []).map((c) => [String(c.category_id), String(c.category_name || '')]));
+  const list = (x) => (Array.isArray(x) ? x : []);
+
+  const [liveCats, live, vodCats, vod] = await Promise.all([
+    xtreamJson(api('get_live_categories')).catch(() => []),
+    xtreamJson(api('get_live_streams')),
+    xtreamJson(api('get_vod_categories')).catch(() => []),
+    xtreamJson(api('get_vod_streams')).catch(() => []),
+  ]);
+  const lc = catMap(liveCats), vc = catMap(vodCats);
+  const out = [];
+  for (const s of list(live)) {
+    if (s.stream_id == null) continue;
+    out.push({ name: String(s.name || 'Channel'), logo: String(s.stream_icon || ''), group: lc.get(String(s.category_id)) || 'Live', headers: {},
+      url: `${base}/live/${seg(p.user)}/${seg(p.pass)}/${seg(s.stream_id)}.${liveExt}`, type: liveExt === 'm3u8' ? 'hls' : 'mpegts' });
+  }
+  for (const s of list(vod)) {
+    if (s.stream_id == null) continue;
+    const ext = /^[a-z0-9]{2,5}$/i.test(s.container_extension || '') ? s.container_extension.toLowerCase() : 'mp4';
+    out.push({ name: String(s.name || 'Movie'), logo: String(s.stream_icon || ''), group: 'Movies · ' + (vc.get(String(s.category_id)) || 'Other'), headers: {},
+      url: `${base}/movie/${seg(p.user)}/${seg(p.pass)}/${seg(s.stream_id)}.${ext}`, type: 'file' });
+  }
+  return out;
+}
+
 // --------------------------------------------- channel store (server-side)
 // Stream URLs (which contain provider credentials for Xtream) stay here; the
 // browser only receives ids.
@@ -421,6 +468,22 @@ input,button{font:inherit;padding:12px;border-radius:8px;border:1px solid #262a3
 <input type="password" name="ppass" placeholder="Password" autocomplete="off">
 <button>Save</button><p>${msg}</p></form></body></html>`;
 
+const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const SETTINGS_HTML = (msg = '', ok = false) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IPTV Player settings</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f1115;color:#e6e8ec;font:16px system-ui,sans-serif}form{display:grid;gap:10px;width:min(380px,92vw);padding:16px 0}
+input,button{font:inherit;padding:12px;border-radius:8px;border:1px solid #262a33;background:#171a21;color:inherit}button{background:#4f8cff;border-color:#4f8cff;color:#fff}h3{margin:14px 0 0;font-size:14px;color:#8b91a0;font-weight:500}a{color:#4f8cff}p{margin:0;min-height:1.2em;color:${ok ? '#3ecf8e' : '#ff5a5f'}}</style></head>
+<body><form method="post" action="/settings"><h2 style="margin:0">Settings</h2>
+<h3>IPTV provider (Xtream Codes)</h3>
+<input name="phost" value="${escHtml(CFG.provider?.host)}" placeholder="Server, e.g. http://provider.com:8080" autocomplete="off" autocapitalize="off">
+<input name="puser" value="${escHtml(CFG.provider?.user)}" placeholder="Username" autocomplete="off" autocapitalize="off">
+<input type="password" name="ppass" placeholder="Password (leave empty to keep current)" autocomplete="off">
+<h3>Change app password (optional)</h3>
+<input type="password" name="newpw" placeholder="New password (8+ characters)" autocomplete="new-password">
+<input type="password" name="newpw2" placeholder="Repeat new password" autocomplete="new-password">
+<h3>Current app password (required to save)</h3>
+<input type="password" name="curpw" placeholder="Current password" autocomplete="current-password" required>
+<button>Save</button><p>${escHtml(msg)}</p><a href="/">← Back to player</a></form></body></html>`;
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const ip = req.socket.remoteAddress;
@@ -487,6 +550,24 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
 
+    if (u.pathname === '/settings') {
+      const page = (code, msg, ok) => send(res, code, SETTINGS_HTML(msg, ok), 'text/html; charset=utf-8', { 'Content-Security-Policy': PAGE_CSP });
+      if (req.method === 'GET') return page(200, '');
+      if (locked(ip)) return page(429, 'Too many attempts — try again in 15 minutes.');
+      const f = new URLSearchParams(await readBody(req, 8192));
+      if (!checkPassword(f.get('curpw') || '')) { recordFailure(ip); return page(401, 'Current password is wrong.'); }
+      const newpw = f.get('newpw') || '';
+      if (newpw && newpw.length < 8) return page(400, 'New password must be at least 8 characters.');
+      if (newpw && newpw !== f.get('newpw2')) return page(400, 'New passwords do not match.');
+      const phost = (f.get('phost') || '').trim().replace(/\/+$/, '');
+      if (phost && !/^https?:\/\/[^\s/]+$/i.test(phost)) return page(400, 'Provider server must look like http://host or http://host:port');
+      if (phost) CFG.provider = { host: phost, user: (f.get('puser') || '').trim(), pass: f.get('ppass') || CFG.provider?.pass || '' };
+      else CFG.provider = null;
+      if (newpw) CFG.password = hashPassword(newpw);
+      saveConfig();
+      return page(200, 'Saved.' + (phost ? ' Go back and tap "Load my channels".' : ''), true);
+    }
+
     if (req.method === 'GET' && STATIC[u.pathname]) {
       const [file, type] = STATIC[u.pathname];
       res.writeHead(200, { ...BASE_HEADERS, 'Content-Type': type, 'Content-Security-Policy': PAGE_CSP });
@@ -503,9 +584,22 @@ const server = http.createServer(async (req, res) => {
       if (ctype.startsWith('application/json')) {
         const body = JSON.parse(await readBody(req, 1e5) || '{}');
         if (body.source === 'provider') {
-          if (!CFG.provider) return json(res, 400, { error: 'No provider configured' });
+          if (!CFG.provider) return json(res, 400, { error: 'No provider configured — add it under Settings' });
           const p = CFG.provider;
+          let apiErr;
+          try {
+            const list = await loadXtream(p);
+            if (list.length) { channels = []; for (const c of list) addChannel(c); return json(res, 200, { channels: channels.map(publicChannel) }); }
+            apiErr = 'provider API returned no channels';
+          } catch (e) { if (e.code === 'EBLOCKED') return json(res, 403, { error: e.message }); apiErr = e.message; }
           src = `${p.host.replace(/\/+$/, '')}/get.php?` + new URLSearchParams({ username: p.user, password: p.pass, type: 'm3u_plus', output: 'm3u8' });
+          let r2;
+          try { r2 = await upstream(src); } catch (e) { return json(res, 502, { error: `Provider failed: ${apiErr}; playlist fallback: ${e.message}` }); }
+          if (r2.statusCode !== 200) { r2.resume(); return json(res, 502, { error: `Provider failed: ${apiErr}; playlist fallback: HTTP ${r2.statusCode}` }); }
+          text = await readText(r2, 200 * 1024 * 1024);
+          if (!/#EXTM3U|#EXTINF/.test(text)) return json(res, 502, { error: `Provider failed: ${apiErr}; playlist fallback returned no channels` });
+          channels = []; for (const c of parseM3U(text)) addChannel(c);
+          return json(res, 200, { channels: channels.map(publicChannel) });
         } else src = String(body.url || '');
         let r;
         try { r = await upstream(src); } catch (e) { return json(res, 502, { error: e.message }); }
